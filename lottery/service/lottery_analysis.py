@@ -1,6 +1,5 @@
-from util.settings import *
-from util.qwen_util import *
-from util.util import *
+from lottery.entity.model_config import *
+from lottery.entity.lottery import *
 
 
 class Analyser:
@@ -8,66 +7,36 @@ class Analyser:
         self.helper = MySQLHelper(LOCAL_DB_CONFIG)
         self.logger = LogUtil.get_logger("analyser")
 
-    @staticmethod
-    def struct_content(purchase_histories: list) -> list:
-        purchase_dict = {}
-        for purchase_history in purchase_histories:
-            purchase_date = purchase_history['purchase_date']
-            detail = {
-                "purchase_number_pre": purchase_history['purchase_number_pre'],
-                "purchase_number_post": purchase_history['purchase_number_post'],
-                "winning_number_pre": purchase_history['winning_number_pre'],
-                "winning_number_post": purchase_history['winning_number_post']
-            }
-            if purchase_date in purchase_dict.keys():
-                purchase_dict[purchase_date].append(detail)
-            else:
-                purchase_dict[purchase_date] = [detail]
-        analysis_list = []
-        for purchase_date, details in purchase_dict.items():
-            whether_purchase = False
-            purchased_list = []
-            winning_list = []
-            for detail in details:
-                purchase_number_pre = detail['purchase_number_pre']
-                purchase_number_post = detail['purchase_number_post']
-                winning_number_pre = detail['winning_number_pre']
-                winning_number_post = detail['winning_number_post']
-                if purchase_number_pre is not None and purchase_number_post is not None:
-                    whether_purchase = True
-                    purchased_number = ANALYSIS_NUMBER_CONTENT.format(purchase_number_pre, purchase_number_post)
-                    purchased_list.append(purchased_number)
-                winning_number = ANALYSIS_NUMBER_CONTENT.format(winning_number_pre, winning_number_post)
-                winning_list.append(winning_number)
+    def query_models(self, model_type: str, model_brand: str) -> MultiModel:
+        query_model_sql = QUERY_MODEL_SQL.format("'" + model_brand + "'", "'" + model_type + "'")
+        model_config = self.helper.execute_query(query_model_sql)
+        if not model_config:
+            raise Exception("模型不存在")
+        model_config = model_config[0]
+        brand = model_config['brand']
+        model_name = model_config['model_name']
+        api_key = model_config['model_api_key']
+        base_url = model_config['model_base_url']
+        multi_model = MultiModel(brand=brand, model_name=model_name, api_key=api_key, base_url=base_url)
+        # self.logger.info("multi_model: %s" % json.dumps(multi_model, ensure_ascii=False))
+        return multi_model
 
-            winning = ANALYSIS_WINNING_CONTENT.format(winning_list[0])
-            if whether_purchase:
-                purchased = ANALYSIS_CONTENT_PURCHASED.format("\n".join(purchased_list))
-                analysis_content = ANALYSIS_CONTENT.format(purchase_date, purchased, winning)
-            else:
-                analysis_content = ANALYSIS_CONTENT.format(purchase_date, " ", winning)
-            analysis_list.append(analysis_content)
-
-        return analysis_list
+    def query_purchase_history(self, analyse_days: int, recommend_size: int, lottery_type: str) -> str:
+        sql = QUERY_RECENT_PURCHASE_HISTORY_SQL.format("'" + LOTTERY_TYPE_DICT[lottery_type] + "'", analyse_days)
+        self.logger.info("query sql: %s" % sql)
+        purchase_histories = self.helper.execute_query(sql)
+        lottery = Lottery(analyse_days=analyse_days, recommend_size=recommend_size, lottery_type=lottery_type)
+        return lottery.get_analysis_content(purchase_histories=purchase_histories)
 
     """
     @:param analyse_days 分析天数
     """
 
-    def analyse(self, analyse_days: int, recommend_size: int, lottery_type: str, model_type: str) -> str:
-        sql = QUERY_RECENT_PURCHASE_HISTORY_SQL.format("'" + LOTTERY_TYPE_DICT[lottery_type] + "'", analyse_days)
-        self.logger.info("query sql: %s" % sql)
-        purchase_histories = self.helper.execute_query(sql)
-        analysis_list = self.struct_content(purchase_histories)
-        self.logger.info("analysis_list: %s" % json.dumps(analysis_list, ensure_ascii=False))
-        if not analysis_list:
-            raise Exception("数据为空，退出本次分析")
-        analysis_content = ANALYSIS_CONTENT_RECOMMEND_NUMBER.format("\n".join(analysis_list), analyse_days,
-                                                                    LOTTERY_TYPE_DICT[lottery_type],
-                                                                    recommend_size)
-        self.logger.info("analysis_content: %s" % analysis_content)
-        qwen = Qwen(api_key=QWEN_API_KEY, base_url=QWEN_BASE_URL)
-        analysis_result = qwen.analyse(content=analysis_content, model=MODEL_DICT[model_type])
-        self.logger.info("analysis_result: %s" % analysis_result)
-        recommend = analysis_result['choices'][0]['message']['content']
+    def analyse(self, analyse_days: int, recommend_size: int, lottery_type: str, model_type: str,
+                model_brand: str) -> str:
+        multi_model: MultiModel = self.query_models(model_type=model_type, model_brand=model_brand)
+        analysis_content = self.query_purchase_history(analyse_days=analyse_days, recommend_size=recommend_size,
+                                                       lottery_type=lottery_type)
+        recommend = multi_model.analyse(content=analysis_content)
+        self.logger.info("分析结果：{}".format(json.dumps(recommend, ensure_ascii=False)))
         return recommend
